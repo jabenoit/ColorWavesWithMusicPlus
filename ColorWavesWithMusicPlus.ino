@@ -686,7 +686,6 @@ void loop() {
       blinkIt(4, 100, 1); // Quatro blink twice
       gCurrentPaletteID = qsub8(gCurrentPaletteID, 1); // go back to previous palette
       for (n = 0; n<NUM_LED_STRIPS; n++) {
-        gCurrentPaletteAry[n] = gGradientPalettes[n][gCurrentPaletteID];
         gTargetPaletteAry[n]  = gGradientPalettes[n][gCurrentPaletteID];    
       }
       updPalettes = true;
@@ -697,7 +696,6 @@ void loop() {
       blinkIt(4, 100, 2); // Quatro blink twice
       gCurrentPaletteID = addmod8( gCurrentPaletteID,1, gGradientPaletteCount-1); // go forward to next palette
       for (n = 0; n<NUM_LED_STRIPS; n++) {
-        gCurrentPaletteAry[n] = gGradientPalettes[n][gCurrentPaletteID];
         gTargetPaletteAry[n]  = gGradientPalettes[n][gCurrentPaletteID];    
       }
       updPalettes = true;

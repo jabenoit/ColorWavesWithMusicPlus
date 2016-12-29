@@ -92,12 +92,12 @@ uint8_t colorMode = 0; // 0=A=colorwaves, 1=B=twinkle, 2=C=confetti
 //Define spectrum variables
 bool    bump[NUM_LED_STRIPS] = {};      // Used to pass if there was a "bump" in volume
 uint8_t bumpCnt[NUM_LED_STRIPS] = {};   // Holds how many bumps were triggered since last cleanup
-uint8_t takenCnt[NUM_LED_STRIPS] = {};  // Holds how many bumps were taken since last cleanup (should be > bumpCnt) - 
-uint8_t avgVol[NUM_LED_STRIPS]  = {}; //Holds the "average" volume-level to proportionally adjust the visual experience.
-uint8_t bumpLvl[NUM_LED_STRIPS] = {};   // level of bump
-uint8_t bumpVolBase = 5;  // multiplied by BUMP_THRESH and VOL_THRESH as input limits
-#define BUMP_THRESH 12  // decrease to make fewer bump flashes, increase for less, see serial log for avgBump to tune
+uint8_t bumpTkn[NUM_LED_STRIPS] = {};  // Holds how many bumps were taken since last cleanup (should be > bumpCnt) - 
+uint8_t lastBump[NUM_LED_STRIPS] = {};   // level of bump
+uint8_t bumpVolBase = 4;  // multiplied by BUMP_THRESH and VOL_THRESH as input limits
+#define BUMP_THRESH 12  // decrease to make fewer bump flashes, increase for less, see serial log for frequency info to tune
 #define VOL_THRESH  16  // for volume calculations, ignore values less than this (skip them)
+bool musicOn = false;   // set true if we have some volume over threshold
 
 //*********************************************************************************
 // IR Remote globals
@@ -588,11 +588,10 @@ void setup() {
   digitalWrite(STROBE, LOW);   delay(1);
   digitalWrite(RESET, LOW);    delay(1);
   // set defaults and max values for global volume vars
-  if (DEBUG_MODE) memset (bumpCnt,    0, NUM_LED_STRIPS);
-  if (DEBUG_MODE) memset (takenCnt,   0, NUM_LED_STRIPS);
-  memset (bumpLvl,    0, NUM_LED_STRIPS);
-  memset (avgVol,     0, NUM_LED_STRIPS);
   memset (bump,   false, NUM_LED_STRIPS);
+  memset (bumpCnt,    0, NUM_LED_STRIPS);
+  memset (bumpTkn,    0, NUM_LED_STRIPS);
+  memset (lastBump,   0, NUM_LED_STRIPS);
   // tell FastLED about the LED strip configuration - can't use variables in template (<>) section - could wrapper it (google PixelUtil)
   // but haven't figured out how to pass the *leds array thru a template... brute force for now
   n = 0; FastLED.addLeds<LED_TYPE,STRIP_DATA_PIN0,COLOR_ORDER>(leds[n], STRIP_NUM_LEDS[n]).setCorrection(TypicalPixelString);
@@ -727,9 +726,7 @@ void loop() {
   EVERY_N_MILLIS( 20 ) {
     for (n = 0; n<NUM_LED_STRIPS; n++) {
       gHue[n] = gHue[n]+1; // slowly cycle the "base color" through the rainbow for confetti
-      if (colorMode == 0) { // blend for colorwaves
-        nblendPaletteTowardPalette( gCurrentPaletteAry[n], gTargetPaletteAry[n], 16);
-      }
+      nblendPaletteTowardPalette( gCurrentPaletteAry[n], gTargetPaletteAry[n], 16);
     }
   }
 
@@ -752,70 +749,62 @@ void loop() {
 
 /*******************Pull frequencies from Spectrum Shield********************/
 void ReadAndProcessBands(){
-  uint8_t freq_amp;
   int Frequencies_One;
   int Frequencies_Two; 
   uint8_t i, b;
   static uint16_t countSteps[] = {0,0,0};
-  uint8_t tmpBump, lastBump;
+  uint8_t tmpBump;
 
   // moved from globals to free up some memory for local allocation / re-use
-  uint8_t volume[NUM_LED_STRIPS]  = { 0,  0,  0}; //Holds the volume level read from the sound detector.
-  uint8_t last[NUM_LED_STRIPS]    = { 0,  0,  0}; //Holds the value of volume from the previous loop() pass.
-  uint8_t maxVol[NUM_LED_STRIPS]  = {72, 72, 72}; //Holds the largest volume recorded thus far to proportionally adjust the visual's responsiveness.
-  uint8_t avgBump[NUM_LED_STRIPS] = { 0,  0,  0}; //Holds the "average" volume-change to trigger a "bump."
-  uint8_t maxBump[NUM_LED_STRIPS] = {16, 16, 16}; //Holds the max bump found
-
+  static uint8_t volume[NUM_LED_STRIPS]  = { 0,  0,  0}; //Holds the volume level read from the sound detector.
+  static uint8_t lastVol[NUM_LED_STRIPS] = { 0,  0,  0}; //Holds the value of volume from the previous loop() pass.
+  static uint8_t avgVol[NUM_LED_STRIPS]  = { 0,  0,  0}; //Holds the "average" volume-level to proportionally adjust the visual experience.
 
   //Read frequencies for each band, for both Left and Ride (stereo) music data
-  for (freq_amp = 0; freq_amp<7; freq_amp++) {
+  for (i = 0; i<7; i++) {
     Frequencies_One = analogRead(DC_One);
     Frequencies_Two = analogRead(DC_Two); 
     digitalWrite(STROBE, HIGH);
     digitalWrite(STROBE, LOW);
  
     if (Frequencies_One > Frequencies_Two) {
-      volume[freq_amp] = (uint8_t) Frequencies_One;
+      volume[i] = (uint8_t) Frequencies_One;
     } else {
-      volume[freq_amp] = (uint8_t) Frequencies_Two;
+      volume[i] = (uint8_t) Frequencies_Two;
     }
   }
 
+  uint8_t volThresh  = qmul8(bumpVolBase,VOL_THRESH);
+  uint8_t bumpThresh = qmul8(bumpVolBase,BUMP_THRESH);
+  musicOn = false;
   for (i = 0; i < NUM_LED_STRIPS; i++) {
     countSteps[i] = countSteps[i] + 1; // uint16_t - no qadd16
-    if (volume[b] > qmul8(bumpVolBase,VOL_THRESH)) {  //    /*Sets a min threshold for volume.
+    if (volume[b] > volThresh) {  //    /*Sets a min threshold for volume.
+      musicOn = true;
       b = STRIP_BAND_MAP[i]; // band
     // For each band we'll use, go find the volume, avgVol, maxVol, etc. info
       avgVol[i] = scale8(qadd8(qmul8(3,avgVol[i]),volume[b]),64); // weighted average
-              
-      //If the current volume is larger than the loudest value recorded, overwrite
-      if (volume[b] > maxVol[i]) maxVol[i] = volume[b];
-  
-      //If there is a decent change in volume since the last pass, average it into "avgBump"
-      tmpBump  = qsub8(volume[b],last[i]); // qsub8 won't go below zero, so no need to check for underflow
-      lastBump = qsub8(avgVol[b],last[i]); // qsub8 won't go below zero, so no need to check for underflow
-      if ((tmpBump > (lastBump)) && (lastBump > 0)) avgBump[i] = scale8(qadd8(qmul8(avgBump[i],3),tmpBump),64); // weighted average
-      if (tmpBump > maxBump[i]) maxBump[i] = tmpBump;
-    
+          
       //if there is a notable change in volume, trigger a "bump"
-      if ((tmpBump > qmul8(bumpVolBase,BUMP_THRESH)) && (tmpBump > scale8(qmul8(3,avgBump[i]),2))) {  // comparing tmpBump to 1.5 * avgBump using fastled math
+      tmpBump  = qsub8(volume[b],lastVol[i]); // qsub8 won't go below zero, so no need to check for underflow
+      if (tmpBump > bumpThresh) {
         bump[i] = true;
         if (DEBUG_MODE) bumpCnt[i] = qadd8(bumpCnt[i],1);
-        bumpLvl[i] = tmpBump;
+        lastBump[i] = tmpBump;
       } else {
-        bumpLvl[i] = 0;
+        bump[i] = false;
+        lastBump[i] = 0;
       }
-      last[i] = volume[b]; //Records current volume for next pass
     }
+    lastVol[i] = volume[b]; //Records current volume for next pass
+
     if (countSteps[i] % 40 == 0) { // 250 steps @ 20mS should be 5S, but seems like that's ~6.5s, so do 6.5/5 of it
-      if (DEBUG_MODE) printSoundStats(i, "40Steps", volume[b], maxVol[i], avgVol[i], bump[i], maxBump[i], bumpCnt[i], takenCnt[i]);      
-      if (DEBUG_MODE) bumpCnt[i]  = 0; // reset every time we print
-      if (DEBUG_MODE) takenCnt[i] = 0; // reset every time we print
+      if (DEBUG_MODE) printSoundStats(i, "40Steps", musicOn, volume[b], lastBump[i], bumpCnt[i], bumpTkn[i]);      
+      bumpCnt[i] = 0; // reset every time we print
+      bumpTkn[i] = 0; // reset every time we print
       if (countSteps[i] > 20000) {
         countSteps[i] = 0;
-        maxVol[i] = 64;
         avgVol[i] = 64;
-        maxBump[i] = 16; // reset every time we print
         countSteps[i] = 0;
       }
     }
@@ -872,15 +861,15 @@ void colorwaves( CRGB* ledarray, uint8_t strip) {
     uint16_t pixelnumber = i;
     pixelnumber = (numleds-1) - pixelnumber; 
     nblend( ledarray[pixelnumber], newcolor, 128);
-    // bump if the volume says so, and then for every other (2nd) led - I tried other modulos there, but any variables caused false bump (takeCnt >0, bumpCnt = 0)  
-    if ((bump[strip] == true) && (mod8(pixelnumber,2) == 0)) {
+    // bump if the volume says so, take a bump on random 25% on this strip  
+    if ((musicOn == true) && (bump[strip] == true)) {
       if (random8(numleds) > scale8(qmul8(numleds,3),64)) { // only bump for a random 25% of pixels
-        ledarray[pixelnumber] += CRGB( bumpLvl[strip], bumpLvl[strip], bumpLvl[strip]);
-        if (DEBUG_MODE) tmpTaken = qadd8(tmpTaken,1);        
+        ledarray[pixelnumber] += CRGB( lastBump[strip], lastBump[strip], lastBump[strip]);
+        tmpTaken = qadd8(tmpTaken,1);        
       }
     }
   }
-  if (DEBUG_MODE) takenCnt[strip] = qadd8(takenCnt[strip],tmpTaken);
+  bumpTkn[strip] = qadd8(bumpTkn[strip],tmpTaken);
   bump[strip] = 0;
 }
 
@@ -897,12 +886,12 @@ void palettetest( CRGB* ledarray, uint8_t strip) {
 void twinkle( CRGB* leds, uint8_t strip) {
   CRGBPalette16 palette = gCurrentPaletteAry[strip];
 
-// pick if we're doing it random or on musix bumps
- if (((avgVol[strip] < (bumpVolBase*VOL_THRESH)) && random8(7) == 1) || bump[strip]) {  // if no music, random, otherwise on bump
+  // pick if we're doing it random or on musix bumps
+  if ((musicOn == false && random8(7) == 1) || ((musicOn == true) && (bump[strip] == true))) {  // if no music, random, otherwise on bump
     uint8_t i = random(STRIP_NUM_LEDS[strip]);
     if (leds[i].red < 1 && leds[i].green < 1 && leds[i].blue < 1) {
       leds[i] = ColorFromPalette( palette, random(256), random(127,255));
-      takenCnt[strip] = qadd8(takenCnt[strip],1);    
+      if (bump[strip] == true) bumpTkn[strip] = qadd8(bumpTkn[strip],1);    
     }
   }
   
@@ -935,8 +924,9 @@ void confetti(CRGB* leds, uint8_t strip) {
   CRGBPalette16 palette = gCurrentPaletteAry[strip];
   fadeToBlackBy( leds, STRIP_NUM_LEDS[strip], 10);
   uint8_t i = random8(STRIP_NUM_LEDS[strip]);
-  if (((avgVol[strip] < (bumpVolBase*VOL_THRESH)) && random8(3) == 1) || bump[strip]) { // if no music, random, otherwise on bump
+  if ((musicOn == false && random8(3) == 1) || ((musicOn == true) && (bump[strip] == true))) {  // if no music, random, otherwise on bump
     leds[i] = ColorFromPalette( palette, random(256), random(127,255));
+    if (bump[strip] == true) bumpTkn[strip] = qadd8(bumpTkn[strip],1);    
   } else {
     leds[i] = ColorFromPalette( palette, random(256), 128);
   }
@@ -1015,31 +1005,32 @@ void printPaletteNames(const char prfx[4], uint8_t paletteID) {
 }
 
 /* For debug - print out music info (why no bumps or two many bumps) */
-void printSoundStats ( uint8_t i, String msg, uint8_t tvol, uint8_t tmaxvol, uint8_t tavgvol, bool tbump, uint8_t tmaxbump, uint8_t tbumpcnt, uint8_t ttakencnt  ) {
-  uint8_t b = STRIP_BAND_MAP[i]; // band
+void printSoundStats ( uint8_t i, String msg, bool tmusicon, uint8_t tvol, uint8_t tlastbump, uint8_t tbumpcnt, uint8_t tbumptkn  ) {
   uint16_t ms = millis();
 
   if (DEBUG_MODE) Serial.print(msg);
   if (DEBUG_MODE) Serial.print(" - ms ");
   if (DEBUG_MODE) Serial.print(ms);
+  if (DEBUG_MODE) Serial.print(" - music ");
+    if (tmusicon == true) {
+      Serial.print("Y");
+    } else {
+      Serial.print("n");
+    }
   if (DEBUG_MODE) Serial.print(" - str ");
   if (DEBUG_MODE) Serial.print(i);
-  if (DEBUG_MODE) Serial.print(" - bnd ");
-  if (DEBUG_MODE) Serial.print(b);
-  if (DEBUG_MODE) Serial.print(" - vol ");
+  if (DEBUG_MODE) Serial.print(" - vol/bmp Thresh ");
+  if (DEBUG_MODE) Serial.print(bumpVolBase * VOL_THRESH);
+  if (DEBUG_MODE) Serial.print("/");
+  if (DEBUG_MODE) Serial.print(bumpVolBase * BUMP_THRESH);
+  if (DEBUG_MODE) Serial.print(" - vol/bmp ");
   if (DEBUG_MODE) Serial.print(tvol);
-  if (DEBUG_MODE) Serial.print(" - max ");
-  if (DEBUG_MODE) Serial.print(tmaxvol);
-//  if (DEBUG_MODE) Serial.print(" - avg ");
-//  if (DEBUG_MODE) Serial.print(tavgvol);
-//  if (DEBUG_MODE) Serial.print(" - bump ");
-//  if (DEBUG_MODE) Serial.print(tbump);
-  if (DEBUG_MODE) Serial.print(" - maxBump ");
-  if (DEBUG_MODE) Serial.print(tmaxbump);
-  if (DEBUG_MODE) Serial.print(" - #bmp ");
+  if (DEBUG_MODE) Serial.print("/");
+  if (DEBUG_MODE) Serial.print(tlastbump);
+  if (DEBUG_MODE) Serial.print(" - #bmp/#tkn ");
   if (DEBUG_MODE) Serial.print(tbumpcnt);
-  if (DEBUG_MODE) Serial.print(" - #tkn ");
-  if (DEBUG_MODE) Serial.println(ttakencnt);
+  if (DEBUG_MODE) Serial.print("/");
+  if (DEBUG_MODE) Serial.println(tbumptkn);
 }
 
 

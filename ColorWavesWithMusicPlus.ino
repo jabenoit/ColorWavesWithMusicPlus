@@ -5,12 +5,11 @@
 //        SparkFun Music Visualizer Tutorial (process frequency data, find "bump"
 //        SparkFun Simple IR Remote (simple control on modes, palettes, bump speed)
 //        Adafruit Twinkle (use FastLED library and palettes)
-//        FastLED Confetti (use palettes)
+//        Fireworks (written from scratch, as I'm not using a matrix display) 
 /*        AFAIK, this will *not* run on Uno's and other devices w/ only 2KB memory -
              you'll need to take out some code (probably either IR remote or Music Vis
              code would be enough) - threshold is somewhere in the 800+ bytes for local
              variables. */
-// Rev1.0 - by John Benoit, December 29 2016 */
 
 /* ColorWavesWithPalettes
    Animated shifting color waves, with several cross-fading color palettes.
@@ -65,20 +64,18 @@ const uint8_t STRIP_NUM_LEDS[]  = { 7, 12, 24 };
 const uint8_t STRIP_BAND_MAP[] = { 5,  3,  1}; // Strip 2 uses band 1 (Bass), Strip 1 uses band 3 (Tenor), Strip 0 uses band 5 (Soprano)
 
 #define MAX_LEDS_IN_STRIP 24
-//#define NUM_LEDS          7+12+30 // could do this algorythmically, but only expect a few strips...
 
 CRGB leds[NUM_LED_STRIPS][MAX_LEDS_IN_STRIP];
 
 // ten seconds per color palette makes a good demo, 20-120 is better for deployment
 #define SECONDS_PER_PALETTE 20
-#define SECONDS_PER_COLORMODE 60
+#define SECONDS_PER_COLORMODE 1800
 bool ROTATE_PALETTE = true;    // can toggle by IRRemote (Select)
 bool ROTATE_COLORMODE = true; // can toggle by IRRemote (Select)
 
 // n for numStrip in for loops - ensure in code doesn't have conflicting usage (and don't keep adding/remove n from heap)
 uint8_t n; 
-
-uint8_t colorMode = 0; // 0=A=colorwaves, 1=B=twinkle, 2=C=confetti
+uint8_t colorMode = 0; // 0=A=colorwaves, 1=B=twinkle, 2=C=fireworks
 
 //*********************************************************************************
 // Spectrum Shield and Music processing globals
@@ -96,8 +93,9 @@ uint8_t bumpTkn[NUM_LED_STRIPS] = {};  // Holds how many bumps were taken since 
 uint8_t lastBump[NUM_LED_STRIPS] = {};   // level of bump
 uint8_t bumpVolBase = 4;  // multiplied by BUMP_THRESH and VOL_THRESH as input limits
 #define BUMP_THRESH 12  // decrease to make fewer bump flashes, increase for less, see serial log for frequency info to tune
-#define VOL_THRESH  16  // for volume calculations, ignore values less than this (skip them)
-bool musicOn = false;   // set true if we have some volume over threshold
+#define VOL_THRESH  19  // for volume calculations, ignore values less than this (skip them)
+uint8_t musicOn = 0;    // use for choosing random vs. bump for stuff
+#define MUSICON_THRESH 32 // how many samples of music do we need before we go into bump mode - + on over VOL_THRESH, - on under
 
 //*********************************************************************************
 // IR Remote globals
@@ -115,10 +113,10 @@ decode_results results;
 #define SELECT 0x10EF20DF
 
 //*********************************************************************************
-// Global Variables for Twinkle (from Adafruit NeoPixel) and Confetti
-float fadeRate = 0.96;
+// Global Variables for Twinkle (from Adafruit NeoPixel) and FireWorks (modified Twinkle)
+#define SPARKLE_AT 32
+bool sparkleList[NUM_LED_STRIPS][MAX_LEDS_IN_STRIP] = {};
 uint8_t gHue[] = { 0, 0, 0}; // rotating "base color" used by many of the patterns
-
 //*********************************************************************************
 /* Gradient Color Palette definitions for ~20 different cpt-city (or other) color palettes.
    In theory, this could all move to the bottom of the file with some forward declares,
@@ -477,7 +475,63 @@ DEFINE_GRADIENT_PALETTE( set0_es_emerald_dragon_01_gp ) {
     0,  14,127,127,
   255,  28,255,255};
 
-const uint8_t gGradientPaletteCount = 18;
+/* Based on Gradient palette "temperature_gp", originally from
+   http://soliton.vm.bytemark.co.uk/pub/cpt-city/arendal/tn/temperature.png.index.html
+   converted for FastLED with gammas (2.6, 2.2, 2.5)
+   Size: 144 bytes of program space. */
+DEFINE_GRADIENT_PALETTE( set0_rainbow_gp ) {
+    0,   1, 27,105,
+   17,   1, 92,197,
+   34,   1,119,221,
+   51,   3,130,151,
+   68,  23,156,149,
+   85,  67,182,112,
+  102, 121,201, 52,
+  119, 142,203, 11,
+  136, 224,223,  1,
+  153, 252,187,  2,
+  170, 247,147,  1,
+  187, 237, 87,  1,
+  204, 229, 43,  1,
+  221, 220, 15,  1,
+  238, 171,  2,  2,
+  255,  80,  3,  3};
+DEFINE_GRADIENT_PALETTE( set1_rainbow_gp ) {
+    0,   1, 27,105,
+   17,   1, 92,197,
+   34,   1,119,221,
+   51,   3,130,151,
+   68,  23,156,149,
+   85,  67,182,112,
+  102, 121,201, 52,
+  119, 142,203, 11,
+  136, 224,223,  1,
+  153, 252,187,  2,
+  170, 247,147,  1,
+  187, 237, 87,  1,
+  204, 229, 43,  1,
+  221, 220, 15,  1,
+  238, 171,  2,  2,
+  255,  80,  3,  3};
+DEFINE_GRADIENT_PALETTE( set2_rainbow_gp ) {
+    0,   1, 27,105,
+   17,   1, 92,197,
+   34,   1,119,221,
+   51,   3,130,151,
+   68,  23,156,149,
+   85,  67,182,112,
+  102, 121,201, 52,
+  119, 142,203, 11,
+  136, 224,223,  1,
+  153, 252,187,  2,
+  170, 247,147,  1,
+  187, 237, 87,  1,
+  204, 229, 43,  1,
+  221, 220, 15,  1,
+  238, 171,  2,  2,
+  255,  80,  3,  3};
+
+const uint8_t gGradientPaletteCount = 19;
 
 /* Three arrays color palettes, where any index in 0 has a matching palette in 1 and 2
  This will let us programmatically choose one based on
@@ -492,6 +546,7 @@ const uint8_t gGradientPaletteCount = 18;
 
 // Section0 (top / interior)
 const TProgmemRGBGradientPalettePtr gGradientPalettes_0[] = {
+  set0_rainbow_gp,
   set0_calla_01_gp,
   set0_es_emerald_dragon_01_gp,
   set0_blue_purple_gp,
@@ -514,6 +569,7 @@ const TProgmemRGBGradientPalettePtr gGradientPalettes_0[] = {
 
 // Section1 (middle)
 const TProgmemRGBGradientPalettePtr gGradientPalettes_1[] = {
+  set1_rainbow_gp,
   set1_calla_01_gp,
   set1_es_emerald_dragon_01_gp,
   set1_blue_purple_gp,
@@ -536,6 +592,7 @@ const TProgmemRGBGradientPalettePtr gGradientPalettes_1[] = {
 
 // Section2 (bottom / exterior)
 const TProgmemRGBGradientPalettePtr gGradientPalettes_2[] = {
+  set2_rainbow_gp,
   set2_calla_01_gp,
   set2_es_emerald_dragon_01_gp,
   set2_blue_purple_gp,
@@ -588,10 +645,11 @@ void setup() {
   digitalWrite(STROBE, LOW);   delay(1);
   digitalWrite(RESET, LOW);    delay(1);
   // set defaults and max values for global volume vars
-  memset (bump,   false, NUM_LED_STRIPS);
-  memset (bumpCnt,    0, NUM_LED_STRIPS);
-  memset (bumpTkn,    0, NUM_LED_STRIPS);
-  memset (lastBump,   0, NUM_LED_STRIPS);
+  memset (bump,        false, NUM_LED_STRIPS);
+  memset (bumpCnt,         0, NUM_LED_STRIPS);
+  memset (bumpTkn,         0, NUM_LED_STRIPS);
+  memset (lastBump,        0, NUM_LED_STRIPS);
+  memset (sparkleList, false, NUM_LED_STRIPS);
   // tell FastLED about the LED strip configuration - can't use variables in template (<>) section - could wrapper it (google PixelUtil)
   // but haven't figured out how to pass the *leds array thru a template... brute force for now
   n = 0; FastLED.addLeds<LED_TYPE,STRIP_DATA_PIN0,COLOR_ORDER>(leds[n], STRIP_NUM_LEDS[n]).setCorrection(TypicalPixelString);
@@ -604,6 +662,7 @@ void setup() {
 
   // 3 second delay for recovery
   delay(3000);
+  musicOn = 0;
 
   // Assign the starting palette
   for (n = 0; n<NUM_LED_STRIPS; n++) {
@@ -616,7 +675,7 @@ void setup() {
         fill_solid( leds[x], STRIP_NUM_LEDS[x], CRGB( 95, 95, 95)); // white
         break;
       case 2:
-        fill_solid( leds[x], STRIP_NUM_LEDS[x], CRGB(  0, 31,  0));
+        fill_solid( leds[x], STRIP_NUM_LEDS[x], CRGB(  0, 31,  0)); // green
         break;
       default:
         fill_solid( leds[x], STRIP_NUM_LEDS[x], CRGB::Blue);
@@ -624,10 +683,11 @@ void setup() {
     }
 
     gCurrentPaletteID     = 0;
+    gCurrentPaletteAry[n] = gGradientPalettes[n][gCurrentPaletteID];    
     gTargetPaletteAry[n]  = gGradientPalettes[n][gCurrentPaletteID];    
   }
   FastLED.show();
-  delay(2000);
+  delay(3000);
 }
 
 void loop() {
@@ -665,7 +725,7 @@ void loop() {
     }
     if (results.value == C) {
       colorMode = 2; 
-      if (DEBUG_MODE) Serial.println(F("C - moving to confetti"));
+      if (DEBUG_MODE) Serial.println(F("C - moving to fireworks"));
       blinkIt(2, 100, 3); // Double blink thrice
     }
     if (results.value == UP) {
@@ -713,17 +773,21 @@ void loop() {
   }
   
   EVERY_N_SECONDS( SECONDS_PER_PALETTE ) {
-    gCurrentPaletteID    = addmod8( gCurrentPaletteID,1, gGradientPaletteCount-1);     
+    gCurrentPaletteID    = random8( gGradientPaletteCount);  
     for (n = 0; n<NUM_LED_STRIPS; n++) {
       gTargetPaletteAry[n] = gGradientPalettes[n][gCurrentPaletteID];
     }
   }
 
-  EVERY_N_MILLIS( 10 ) { // keep at different rate then blend, so the bumps move around
+  EVERY_N_SECONDS( SECONDS_PER_COLORMODE ) {
+    colorMode = random8(3);
+  }
+
+  EVERY_N_MILLIS( 20 ) { // sample more often then we need
     ReadAndProcessBands();
   }
   
-  EVERY_N_MILLIS( 20 ) {
+  EVERY_N_MILLIS( 40 ) {
     for (n = 0; n<NUM_LED_STRIPS; n++) {
       gHue[n] = gHue[n]+1; // slowly cycle the "base color" through the rainbow for confetti
       nblendPaletteTowardPalette( gCurrentPaletteAry[n], gTargetPaletteAry[n], 16);
@@ -732,15 +796,13 @@ void loop() {
 
   for (n = 0; n<NUM_LED_STRIPS; n++) {
     if (colorMode == 2) {
-//      Fire2012WithPalette(leds[n], n);
-      confetti(leds[n], n);
+      fireworks(leds[n], n);
     } else if (colorMode == 1) {
       twinkle(leds[n], n);
     } else {
       colorwaves(leds[n], n);
     }
   }
-
   while (!irrecv.isIdle());  // if not idle, wait till complete
 
   FastLED.show();
@@ -759,7 +821,6 @@ void ReadAndProcessBands(){
   static uint8_t volume[NUM_LED_STRIPS]  = { 0,  0,  0}; //Holds the volume level read from the sound detector.
   static uint8_t lastVol[NUM_LED_STRIPS] = { 0,  0,  0}; //Holds the value of volume from the previous loop() pass.
   static uint8_t avgVol[NUM_LED_STRIPS]  = { 0,  0,  0}; //Holds the "average" volume-level to proportionally adjust the visual experience.
-
   //Read frequencies for each band, for both Left and Ride (stereo) music data
   for (i = 0; i<7; i++) {
     Frequencies_One = analogRead(DC_One);
@@ -776,11 +837,11 @@ void ReadAndProcessBands(){
 
   uint8_t volThresh  = qmul8(bumpVolBase,VOL_THRESH);
   uint8_t bumpThresh = qmul8(bumpVolBase,BUMP_THRESH);
-  musicOn = false;
+
   for (i = 0; i < NUM_LED_STRIPS; i++) {
     countSteps[i] = countSteps[i] + 1; // uint16_t - no qadd16
     if (volume[b] > volThresh) {  //    /*Sets a min threshold for volume.
-      musicOn = true;
+      musicOn = qadd8(musicOn, 1);
       b = STRIP_BAND_MAP[i]; // band
     // For each band we'll use, go find the volume, avgVol, maxVol, etc. info
       avgVol[i] = scale8(qadd8(qmul8(3,avgVol[i]),volume[b]),64); // weighted average
@@ -795,7 +856,9 @@ void ReadAndProcessBands(){
         bump[i] = false;
         lastBump[i] = 0;
       }
-    }
+    } else {
+      musicOn = qsub8(musicOn, 1);
+	}
     lastVol[i] = volume[b]; //Records current volume for next pass
 
     if (countSteps[i] % 40 == 0) { // 250 steps @ 20mS should be 5S, but seems like that's ~6.5s, so do 6.5/5 of it
@@ -823,7 +886,8 @@ void colorwaves( CRGB* ledarray, uint8_t strip) {
 //  uint8_t sat8 = beatsin88( 87, 220, 250);
   uint8_t brightdepth = beatsin88( 341, 96, 224);
   uint16_t brightnessthetainc16 = beatsin88( 203, (25 * 256), (40 * 256));
-  uint8_t msmultiplier = beatsin88(147, 23, 60);
+//  uint8_t msmultiplier = beatsin88(147, 23, 60);
+  uint8_t msmultiplier = beatsin88(32, 7, 30); // trying to slow down the waves - jabenoit
 
   uint16_t hue16 = sHue16[strip];//gHue * 256;
   uint16_t hueinc16 = beatsin88(113, 300, 1500);
@@ -862,7 +926,7 @@ void colorwaves( CRGB* ledarray, uint8_t strip) {
     pixelnumber = (numleds-1) - pixelnumber; 
     nblend( ledarray[pixelnumber], newcolor, 128);
     // bump if the volume says so, take a bump on random 25% on this strip  
-    if ((musicOn == true) && (bump[strip] == true)) {
+    if ((musicOn >= MUSICON_THRESH) && (bump[strip] == true)) {
       if (random8(numleds) > scale8(qmul8(numleds,3),64)) { // only bump for a random 25% of pixels
         ledarray[pixelnumber] += CRGB( lastBump[strip], lastBump[strip], lastBump[strip]);
         tmpTaken = qadd8(tmpTaken,1);        
@@ -886,49 +950,51 @@ void palettetest( CRGB* ledarray, uint8_t strip) {
 void twinkle( CRGB* leds, uint8_t strip) {
   CRGBPalette16 palette = gCurrentPaletteAry[strip];
 
-  // pick if we're doing it random or on musix bumps
-  if ((musicOn == false && random8(7) == 1) || ((musicOn == true) && (bump[strip] == true))) {  // if no music, random, otherwise on bump
-    uint8_t i = random(STRIP_NUM_LEDS[strip]);
-    if (leds[i].red < 1 && leds[i].green < 1 && leds[i].blue < 1) {
-      leds[i] = ColorFromPalette( palette, random(256), random(127,255));
-      if (bump[strip] == true) bumpTkn[strip] = qadd8(bumpTkn[strip],1);    
-    }
-  }
-  
   for(uint8_t l = 0; l < STRIP_NUM_LEDS[strip]; l++) {
     if (leds[l]) { // lit to some degree
-      if (leds[l].red) {
-        leds[l].red = leds[l].red * fadeRate;
-      } else {
-        leds[l].red = 0;
-      }
-      if (leds[l].green > 1) {
-        leds[l].green = leds[l].green * fadeRate;
-      } else {
-        leds[l].green = 0;
-      }
-      if (leds[l].blue > 1) {
-        leds[l].blue = leds[l].blue * fadeRate;
-      } else {
-        leds[l].blue = 0;
-      }
+      leds[l].fadeToBlackBy(32);
     } else {
-      leds[l] = CRGB(0, 0, 0);
+      // pick if we're doing it random or on music bumps
+      if ((musicOn == 0 && random8(20) == 1) || ((musicOn >= MUSICON_THRESH) && (bump[strip] == true))) {  // if no music, random, otherwise on bump
+        uint8_t i = random(STRIP_NUM_LEDS[strip]);
+        if ((qadd8((qadd8(leds[l].red, leds[l].green)), leds[l].blue)) < SPARKLE_AT ) { // faded enough for another twinkle
+          leds[i] = ColorFromPalette( palette, random(255), random(159,255));
+          if (bump[strip] == true) bumpTkn[strip] = qadd8(bumpTkn[strip],1);    
+        }
+      } else {  
+        leds[l] = CRGB(0, 0, 0);
+      }
     }
   }
 }
 
-/* More LEDs on random changes and fading */
-void confetti(CRGB* leds, uint8_t strip) {
-  // random colored speckles that blink in and fade smoothly
+void fireworks( CRGB* leds, uint8_t strip) {
   CRGBPalette16 palette = gCurrentPaletteAry[strip];
-  fadeToBlackBy( leds, STRIP_NUM_LEDS[strip], 10);
-  uint8_t i = random8(STRIP_NUM_LEDS[strip]);
-  if ((musicOn == false && random8(3) == 1) || ((musicOn == true) && (bump[strip] == true))) {  // if no music, random, otherwise on bump
-    leds[i] = ColorFromPalette( palette, random(256), random(127,255));
-    if (bump[strip] == true) bumpTkn[strip] = qadd8(bumpTkn[strip],1);    
-  } else {
-    leds[i] = ColorFromPalette( palette, random(256), 128);
+
+  for(uint8_t l = 0; l < STRIP_NUM_LEDS[strip]; l++) {
+    if (leds[l]) { // lit to some degree
+      if (sparkleList[strip][l]) {
+        leds[l].fadeToBlackBy(16);        
+      } else if ((qadd8((qadd8(leds[l].red, leds[l].green)), leds[l].blue)) < SPARKLE_AT ) { // faded enough for a sparkle
+        // have a 40% chance at a sparkle
+        if (random8(5) <= 1) {
+           leds[l] += CRGB(64,64,64);
+           sparkleList[strip][l] = true;
+        }
+      } else {
+        leds[l].fadeToBlackBy(8);
+      }
+    } else {
+      sparkleList[strip][l] = false;
+      // pick if we're doing it random or on music bumps
+      if ((musicOn == 0 && random8(7) == 1) || ((musicOn >= MUSICON_THRESH) && (bump[strip] == true))) {  // if no music, random, otherwise on bump
+        uint8_t i = random8(STRIP_NUM_LEDS[strip]);
+        leds[i] = ColorFromPalette(palette, random8(192,255)); // assumes the brighter colors are on the higher end of the palette
+        if (bump[strip] == true) bumpTkn[strip] = qadd8(bumpTkn[strip],1);    
+      } else {
+        leds[l] = CRGB(0, 0, 0);
+      }
+    }
   }
 }
 
@@ -968,8 +1034,9 @@ const char palette_14[] PROGMEM = "set0_Analogous_12_gp";
 const char palette_15[] PROGMEM = "set0_realpeach_gp";
 const char palette_16[] PROGMEM = "set0_passionfruit_gp";
 const char palette_17[] PROGMEM = "set0_GMT_seis_gp";
-// Then set up a table to refer to your strings.
+const char palette_18[] PROGMEM = "set0_rainbow_gp";
 
+// Then set up a table to refer to your strings.
 const char * const paletteNameTable[] PROGMEM = {   
   palette_00,
   palette_01,
@@ -989,6 +1056,7 @@ const char * const paletteNameTable[] PROGMEM = {
   palette_15,
   palette_16,
   palette_17,
+  palette_18,
   };
 
 /* For debug - print out palette we're using */
@@ -1005,18 +1073,14 @@ void printPaletteNames(const char prfx[4], uint8_t paletteID) {
 }
 
 /* For debug - print out music info (why no bumps or two many bumps) */
-void printSoundStats ( uint8_t i, String msg, bool tmusicon, uint8_t tvol, uint8_t tlastbump, uint8_t tbumpcnt, uint8_t tbumptkn  ) {
+void printSoundStats ( uint8_t i, String msg, uint8_t tmusicon, uint8_t tvol, uint8_t tlastbump, uint8_t tbumpcnt, uint8_t tbumptkn  ) {
   uint16_t ms = millis();
 
   if (DEBUG_MODE) Serial.print(msg);
   if (DEBUG_MODE) Serial.print(" - ms ");
   if (DEBUG_MODE) Serial.print(ms);
   if (DEBUG_MODE) Serial.print(" - music ");
-    if (tmusicon == true) {
-      Serial.print("Y");
-    } else {
-      Serial.print("n");
-    }
+  if (DEBUG_MODE) Serial.print(tmusicon);
   if (DEBUG_MODE) Serial.print(" - str ");
   if (DEBUG_MODE) Serial.print(i);
   if (DEBUG_MODE) Serial.print(" - vol/bmp Thresh ");

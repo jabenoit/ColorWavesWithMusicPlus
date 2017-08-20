@@ -84,7 +84,7 @@ bool gFireworksActive = false;  // set true inside prodedure, so main loop won't
                                 // causes IR remote to never get read, as after 1-2 seconds, we have 20-30 fireworks queued up
 
 uint8_t gTmpIdx        = 0; // for gTtmpIdx numStrip loops - ensure in code doesn't have conflicting usage (and don't keep adding/remove n from heap)
-uint8_t gPatternNumber = random8(0,3); // 0=A=colorwaves, 1=B=twinkle, 2=C=fireworks, 3=O=spiralwaves
+uint8_t gPatternNumber = 3; // 0=A=colorwaves, 1=B=twinkle, 2=C=fireworks, 3=Power=spiralwaves
 uint8_t gHue           = random8(255); // used in spiralwaves
 
 
@@ -147,6 +147,13 @@ bool ambientDark = false;   // true will enable show, false will disable
 #define BASE_LOOP_MS         10 // tune based on your prefs
 bool gSparkleList[NUM_LED_STRIPS][MAX_LEDS_IN_STRIP] = {};
 //uint8_t gHue[] = { 0, 0, 0}; // rotating "base color" used by many of the patterns
+
+//*********************************************************************************
+// >8s watchdog timer stuff
+volatile int WDcounter;      // Count number of times ISR is called.
+volatile int WDcountmax = 8; // Timer expires after about 64 secs if
+                             // 8 sec interval is selected below.
+
 
 void setup() {
   if (DEBUG_MODE)   Serial.begin(57600);  // open the serial port at 57600 bps
@@ -234,6 +241,8 @@ CRGBPalette16 gTargetPalette[]  = { {gGradientPalettes[0][0]}, {gGradientPalette
 bool updPalettes = true; // use for setting palette away from RGB / Black on the 1st pass, and then updating on userInput
 
 void loop() {
+  watchdogEnable(); // set up watchdog timer in interrupt-only mode
+   
   if (updPalettes == true) {
     for (gTmpIdx = 0; gTmpIdx<NUM_LED_STRIPS; gTmpIdx++) {
       gTargetPalette[gTmpIdx]  = gGradientPalettes[gTmpIdx][gCurrentPaletteNumber];    
@@ -352,17 +361,17 @@ void loop() {
     }
   }
 
-
+  FastLED.setBrightness(BRIGHTNESS);
+  // don't do fireworks and spiralwaves for every strip, as they treat it as 1 long spiral strip
   if (gPatternNumber == 2) {
-    // don't do for every strip, as it doesn't allow other things to change
-    if (gFireworksActive == false) {
       fireworks(); // operates on all strips at same time
-    }
+  } else if (gPatternNumber == 3) {
+    // spiralwaves has all the LEDs on together all the time - current draw issues, scale to 75% power
+    FastLED.setBrightness(scale8(BRIGHTNESS,192));
+    spiralwaves(); // operates on all strips at same time
   } else {
     for (gTmpIdx = 0; gTmpIdx < NUM_LED_STRIPS; gTmpIdx++) {
-      if (gPatternNumber == 3) {
-        spiralwaves(); // operates on all strips at same time
-      } else if (gPatternNumber == 1) {
+      if (gPatternNumber == 1) {
         twinkle(leds[gTmpIdx], gTmpIdx);
       } else {
         colorwaves(leds[gTmpIdx], gTmpIdx);
@@ -374,6 +383,8 @@ void loop() {
 
   FastLED.show();
   FastLED.delay(30); // match this to the fastest values above for palette updates
+  
+  wdt_disable(); // disable the watchdog timer at end of main loop - 
 }
 
 /*******************Read PhotoCell to detect ambient light********************/
@@ -720,11 +731,10 @@ void fireworks( ) {
   gFireworksActive = false; // tell global loop OK to send another
 }
 
-/* Gradient palette "GMT_seis_gp", originally from
+/* Used by spiralwaves - Gradient palette "GMT_seis_gp", originally from
    http://soliton.vm.bytemark.co.uk/pub/cpt-city/gmt/tn/GMT_seis.png.index.html
    converted for FastLED with gammas (2.6, 2.2, 2.5)
    Size: 40 bytes of program space. */
-// used for fireworks
 DEFINE_GRADIENT_PALETTE( GMT_seis2_gp ) {
     0,  88,  0,  0,
    28, 255,  0,  0,
@@ -750,10 +760,8 @@ DEFINE_GRADIENT_PALETTE( GMT_seis2_gp ) {
 void spiralwaves( ) {
   uint8_t l, lTmp, str, m;
   uint8_t active, tIdx, lHue;
-  CRGBPalette16 palette = GMT_seis2_gp;
-
-  // make sure everytyhing is off
-//  for(str = 0; str < NUM_LED_STRIPS; str++) { fill_solid( leds[str], STRIP_NUM_LEDS[str], CRGB::Black); }
+//  CRGBPalette16 palette = GMT_seis2_gp;
+  CRGBPalette16 palette = RainbowColors_p;
 
   // spiralling up with a small tail (fadeToBlack)
   for(active = 0; active <= TOTAL_NUM_LEDS; active++) {
@@ -772,15 +780,12 @@ void spiralwaves( ) {
       l = mod8(qadd8(STRIP_SPIRAL_START[str],lTmp),STRIP_NUM_LEDS[str]); // use modulo so that we only address LEDs we have - will wrap if START > 0
       if (tIdx == active) {
         leds[str][l] = ColorFromPalette( palette, gHue);
-//      } else {
-//        leds[str][l].fadeToBlackBy(1);
       }
       FastLED.show();
-//      FastLED.delay(1); // tiny delay, as it's in a loop
       lHue += 4; // increment lHue every time thru the loop
     }
   }  
-  gHue += 4; // update global hue (shift starting color by 1) only on big loop
+  gHue += 4; // update global hue (shift starting color by X) only on big loop
 }
 
 /* Blink the built-in Arduino LED ("L", next to Tx/Rx typically) to show we received an IR code */
@@ -904,7 +909,52 @@ void printNoiseStats ( uint8_t i, String msg, uint16_t tgmusicon, uint16_t tvol,
   if (DEBUG_MODE) Serial.println(tbumptkn);
 }
 
+/* code for setting up the watchdog timer - reset the duino if we ever go for 
+ *  more than 5 seconds without a watchdog reset
+ */
+void watchdogEnable() {
+  WDcounter=0;
+  cli();                             // disable interrupts
+  
+  MCUSR = 0;                         // reset status register flags
+  
+                                     // Put timer in interrupt-only mode:                                        
+  WDTCSR |= 0b00011000;              // Set WDCE (5th from left) and WDE (4th from left) to enter config mode,
+                                     // using bitwise OR assignment (leaves other bits unchanged).
+  WDTCSR =  0b01000000 | 0b100001;    // set WDIE (interrupt enable...7th from left, on left side of bar)
+                                     // clr WDE (reset enable...4th from left)
+                                     // and set delay interval (right side of bar) to 8 seconds,
+                                     // using bitwise OR operator.
+  
+  sei();                              // re-enable interrupts
+  //wdt_reset();                      // this is not needed...timer starts without it
+  
+  // delay interval patterns:
+  //  16 ms:     0b000000
+  //  500 ms:    0b000101
+  //  1 second:  0b000110
+  //  2 seconds: 0b000111
+  //  4 seconds: 0b100000
+  //  8 seconds: 0b100001
+}
 
+ISR(WDT_vect) // watchdog timer interrupt service routine
+{
+  WDcounter+=1;
+  if (WDcounter < WDcountmax) {
+    wdt_reset(); // start timer again (still in interrupt-only mode)
+  } else {
+    // then change timer to reset-only mode with short (16 ms) fuse
+     MCUSR = 0;                          // reset flags
+                                         // Put timer in reset-only mode:
+     WDTCSR |= 0b00011000;               // Enter config mode.
+     WDTCSR =  0b00001000 | 0b000000;    // clr WDIE (interrupt enable...7th from left)
+                                         // set WDE (reset enable...4th from left), and set delay interval
+                                         // reset system in 16 ms...
+                                         // unless wdt_disable() in loop() is reached first
+     //wdt_reset(); // not needed
+  }
+}
 
 //*********************************************************************************
 /* Gradient Color Palette definitions for ~20 different cpt-city (or other) color palettes.
